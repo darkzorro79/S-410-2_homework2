@@ -1,0 +1,213 @@
+---
+- name: homework*
+  hosts: homework
+  become: yes
+  tasks:
+  - block: #Install docker + docker-compose
+      - name: Run the equivalent of "apt-get update" as a separate step
+        ansible.builtin.apt:
+          update_cache: yes
+      - name: install impotent packege
+        ansible.builtin.apt:
+          pkg:
+          - ca-certificates
+          - curl
+          - gnupg
+      - name: Add Docker’s official GPG key
+        ansible.builtin.shell: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker.gpg
+          echo "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        args:
+          executable: /bin/bash
+      - name: Run the equivalent of "apt-get update" as a separate step
+        ansible.builtin.apt:
+          update_cache: yes
+      - name: Install docker
+        ansible.builtin.apt:
+          pkg:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+      - name: start docker
+        ansible.builtin.shell: |
+          sudo systemctl enable --now docker
+        args:
+          executable: /bin/bash
+      - name: Install docker-compose
+        ansible.builtin.shell: |
+          sudo curl -L https://github.com/docker/compose/releases/download/v2.20.2/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+        args:
+          executable: /bin/bash 
+    when: ansible_facts['os_family'] == "Debian"
+  - block: # Install docker registry in docker
+      - name: Create directory /opt/registry
+        ansible.builtin.file:
+          path: /opt/registry
+          state: directory
+          owner: root
+          group: root
+          mode: '0755'
+      - name: Copy registry.service file
+        ansible.builtin.copy:
+          src: ~/homework/registry.service
+          dest: /etc/systemd/system/registry.service
+          owner: root
+          group: root
+          mode: '0644'
+      - name: Create service and start
+        ansible.builtin.shell: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now registry.service
+        args:
+          executable: /bin/bash
+    when: (inventory_hostname == "dockerrg")
+  - block: # Patching hosts for working with privite registry.
+      - name: copy docker script file
+        copy:
+          src: ~/homework/docker-insecure.sh
+          dest: /tmp/docker-insecure.sh
+          owner: root
+          group: root
+          mode: '0777'
+      - name: exec script
+        ansible.builtin.shell: |
+          /tmp/docker-insecure.sh
+        args:
+          executable: /bin/bash
+      - name: delete file script
+        ansible.builtin.file:
+          path: /tmp/docker-insecure.sh
+          state: absent
+    when: ansible_facts['os_family'] == "Debian"
+  - block: # Configure RabbitMQ
+      - name: Copy conf file for docker definitions.json
+        copy:
+          src: ~/homework/Documents/my_project/rabbitmq/definitions.json
+          dest: /tmp/definitions.json
+      - name: Copy conf file for docker rabbitmq.conf
+        copy:
+          src: ~/homework/Documents/my_project/rabbitmq/rabbitmq.conf
+          dest: /tmp/rabbitmq.conf
+      - name: Copy conf file for docker Dockerfile
+        copy:
+          src: ~/homework/Documents/my_project/rabbitmq/Dockerfile
+          dest: /tmp/Dockerfile
+      - name: Compile Docker image
+        ansible.builtin.shell: |
+          cd /tmp; docker build -t rabbitmq:1.0 .
+        args:
+          executable: /bin/bash
+      - name: Copy service file
+        copy:
+          src: ~/homework/my_project-rabbitmq.service
+          dest: /etc/systemd/system/my_project-rabbitmq.service
+          owner: root
+          group: root
+          mode: '0644'
+      - name: start rmq service
+        ansible.builtin.shell: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now my_project-rabbitmq.service
+        args:
+          executable: /bin/bash
+      - name: tagging image and push
+        ansible.builtin.shell: |
+          docker tag rabbitmq:1.0 dockerreg:5000/rabbitmq:1.0
+          docker push dockerreg:5000/rabbitmq:1.0
+        args:
+          executable: /bin/bash
+    when: (inventory_hostname == "rmq")
+  - block: # Configure sender
+      - name: Copy docker files
+        copy:
+          src: ~/homework/Documents/my_project/sender/Dockerfile
+          dest: /tmp/Dockerfile
+      - copy:
+          src: ~/homework/Documents/my_project/sender/sender.py
+          dest: /tmp/sender.py
+      - name: Create conf file dir
+        ansible.builtin.file:
+          path: /etc/my_project/sender/
+          state: directory
+          mode: '0755'
+      - name: Copy conf file in to dir
+        copy:
+          src: ~/homework/Documents/my_project/sender/sender.yaml
+          dest: /etc/my_project/sender/sender.yaml
+      - name: Compile Docker image
+        ansible.builtin.shell: |
+          cd /tmp; docker build -t sender:1.0 .
+        args:
+          executable: /bin/bash
+      - name: Copy service file
+        copy:
+          src: ~/homework/my_project-sender.service
+          dest: /etc/systemd/system/my_project-sender.service
+          owner: root
+          group: root
+          mode: '0644'
+      - name: start sender service
+        ansible.builtin.shell: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now my_project-sender.service
+        args:
+          executable: /bin/bash
+      - name: tagging image and push
+        ansible.builtin.shell: |
+          docker tag sender:1.0 dockerreg:5000/sender:1.0
+          docker push dockerreg:5000/sender:1.0
+        args:
+          executable: /bin/bash
+    when: (inventory_hostname == "work1")  
+  - block: # Configure reciver
+      - name: Copy docker files
+        copy:
+          src: ~/homework/Documents/my_project/receiver/Dockerfile
+          dest: /tmp/Dockerfile
+      - copy:
+          src: ~/homework/Documents/my_project/receiver/receiver.py
+          dest: /tmp/receiver.py
+      - name: Create conf file dir
+        ansible.builtin.file:
+          path: /etc/my_project/receiver
+          state: directory
+          mode: '0755'
+      - name: Create conf file dir
+        ansible.builtin.file:
+          path: /var/log/my_project/receiver
+          state: directory
+          mode: '0755'
+      - name: Copy receiver config
+        copy:
+          src: ~/homework/Documents/my_project/receiver/receiver.yaml
+          dest: /etc/my_project/receiver/receiver.yaml
+      - name: Compile Docker image
+        ansible.builtin.shell: |
+          cd /tmp; docker build -t receiver:1.0 .
+        args:
+          executable: /bin/bash
+      - name: Copy service file
+        copy:
+          src: ~/homework/my_project-receiver.service
+          dest: /etc/systemd/system/my_project-receiver.service
+          owner: root
+          group: root
+          mode: '0644'
+      - name: start recevicer service
+        ansible.builtin.shell: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now my_project-receiver.service
+        args:
+          executable: /bin/bash
+      - name: tagging image and push
+        ansible.builtin.shell: |
+          docker tag receiver:1.0 dockerreg:5000/receiver:1.0
+          docker push dockerreg:5000/receiver:1.0
+        args:
+          executable: /bin/bash
+    when: (inventory_hostname == "work2")  
